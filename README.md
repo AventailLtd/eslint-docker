@@ -10,3 +10,7 @@ docker run --rm -it -w /var/www/html -v /var/www/html/:/var/www/html sha256:asda
 
 # tmp mount azért kell, mert a mountolt könyvtár node_modules t használja alapból a stylelint, ami nem kívánatos.
 docker run --rm -it -w /var/www/html -v /tmp:/var/www/html/node_modules -v /var/www/html/:/var/www/html dblaci/frontend-linter:20221017 bash -c "/node_modules/stylelint/bin/stylelint.js 'src*/**/*.{scss,vue}' --ignore-path .eslintignore.prod"
+
+TODO:
+
+- stylelint 13->14 upgrade?
