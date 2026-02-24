@@ -1,0 +1,41 @@
+{
+  "name": "frontend-linter",
+  "description": "eslint, stylelint",
+  "version": "1.0.0",
+  "repository": "",
+  "keywords": [
+    "util"
+  ],
+  "scripts": {
+    "lint:css": "stylelint '**/*.vue' 'src*/**/*.scss' --syntax scss --cache",
+    "lint:css:prod": "stylelint '**/*.vue' 'src*/**/*.scss' --syntax scss --cache --ignore-path .eslintignore.prod",
+    "lint:js": "eslint",
+    "lint:js:all": "eslint 'src*/**/*.{js,vue}' --cache",
+    "lint:js:prod": "eslint 'src*/**/*.{js,vue}' 'vue/**/*.{js,vue}' --ignore-path .eslintignore.prod --cache",
+    "lint:js:fix": "eslint 'src*/**/*.{js,vue}' --fix --cache"
+  },
+  "private": true,
+  "author": "DBLaci",
+  "contributors": [],
+  "dependencies": {
+    "@babel/core": "^7.0.0",
+    "@babel/eslint-parser": "^7.19.1",
+    "@babel/plugin-proposal-class-properties": "^7.8.3",
+    "@babel/plugin-syntax-dynamic-import": "^7.0.0",
+    "@babel/preset-env": "^7.1.6",
+    "babel-helper-vue-jsx-merge-props": "^2.0.3",
+    "babel-plugin-syntax-jsx": "^6.18.0",
+    "babel-plugin-transform-vue-jsx": "^3.5.1",
+    "eslint": "^8.25.0",
+    "eslint-config-standard": "^17.0.0",
+    "eslint-plugin-import": "^2.26.0",
+    "eslint-plugin-n": "^15.3.0",
+    "eslint-plugin-promise": "^6.1.0",
+    "eslint-plugin-vue": "^9.6.0",
+    "postcss-html": "^1.5.0",
+    "stylelint": "^14.14.0",
+    "stylelint-config-standard-scss": "^5.0.0",
+    "stylelint-config-standard-vue": "^1.0.0",
+    "eslint-plugin-local-rules": "file:eslint-local-rules"
+  }
+}
