@@ -2,6 +2,7 @@
 
 module.exports = {
   rules: {
+    'no-undefined-vuex-mapping': require('./no-undefined-vuex-mapping.js'),
     'no-v-t-directive': {
       meta: {
         type: 'problem',
