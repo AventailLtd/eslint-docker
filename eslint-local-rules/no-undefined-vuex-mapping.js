@@ -31,6 +31,14 @@ const VUE_BUILTINS = new Set([
   '$cookies',
 ])
 
+// Globals that are intentionally available from Vue template expressions.
+const TEMPLATE_GLOBALS = new Set([
+  'Array', 'Boolean', 'Date', 'Infinity', 'JSON', 'Map', 'Math', 'NaN',
+  'Number', 'Object', 'Promise', 'RegExp', 'Set', 'String', 'Symbol',
+  'decodeURI', 'decodeURIComponent', 'encodeURI', 'encodeURIComponent',
+  'isFinite', 'isNaN', 'parseFloat', 'parseInt', 'undefined',
+])
+
 /**
  * Cache for mixin property extraction to avoid re-reading files.
  * @type {Map<string, Set<string>>}
@@ -326,7 +334,7 @@ function extractPiniaStoreProperties(storePath) {
     }
 
     for (const sectionName of ['getters', 'actions']) {
-      const sectionMatch = content.match(new RegExp(sectionName + '\\s*:\\s*\\{'))
+      const sectionMatch = content.match(new RegExp(sectionName + '\\s*:\\s*\\{')) // nosemgrep - sectionName is from a closed local literal set.
       if (sectionMatch === null) {
         continue
       }
@@ -371,7 +379,7 @@ function extractSpreadSourceProperties(sourceCode, importPathByName) {
   const spreadRegex = /\.\.\.([a-zA-Z_$][a-zA-Z0-9_$]*)\.(state|getters|actions)/g
   let spreadMatch
 
-  while ((spreadMatch = spreadRegex.exec(sourceCode)) !== null) {
+  while ((spreadMatch = spreadRegex.exec(sourceCode)) !== null) { // nosemgrep - static local regex on linted source, not runtime user input.
     const importName = spreadMatch[1]
     const importPath = importPathByName.get(importName)
 
@@ -399,7 +407,7 @@ function extractSpreadSourceNames(sourceCode) {
   const spreadRegex = /\.\.\.([a-zA-Z_$][a-zA-Z0-9_$]*)\.(state|getters|actions)/g
   let spreadMatch
 
-  while ((spreadMatch = spreadRegex.exec(sourceCode)) !== null) {
+  while ((spreadMatch = spreadRegex.exec(sourceCode)) !== null) { // nosemgrep - static local regex on linted source, not runtime user input.
     names.add(spreadMatch[1])
   }
 
@@ -487,6 +495,9 @@ const MAP_FUNCTIONS = new Set([
   'mapGetters', 'mapState', 'mapActions', 'mapMutations',
 ])
 
+const VUEX_GETTER_REPORT_MESSAGE = 'Vuex getter mapping references an undefined getter: {{name}}. {{suggestion}}'
+const TEMPLATE_UNDEFINED_MEMBER_MESSAGE = "'{{name}}' is used in a template expression but is not exposed by data, computed, methods, props, setup, mixins, or Vuex mappings."
+
 /**
  * Extract local property names from a map* call.
  * Handles:
@@ -533,6 +544,401 @@ function extractMapNames(node) {
   }
 
   return names
+}
+
+/**
+ * Extract Vuex getter mapping entries from a mapGetters call.
+ *
+ * @param {import('estree').CallExpression} node
+ * @returns {{localName: string, mappedName: string}[]}
+ */
+function extractMapGetterEntries(node) {
+  const entries = []
+
+  if (node.arguments.length === 0) {
+    return entries
+  }
+
+  let namespace = null
+  let mappingArg = null
+
+  if (node.arguments.length === 1) {
+    mappingArg = node.arguments[0]
+  } else if (node.arguments.length === 2) {
+    if (node.arguments[0].type === 'Literal' && typeof node.arguments[0].value === 'string') {
+      namespace = node.arguments[0].value
+    }
+    mappingArg = node.arguments[1]
+  }
+
+  if (mappingArg === null) {
+    return entries
+  }
+
+  if (mappingArg.type === 'ObjectExpression') {
+    for (const prop of mappingArg.properties) {
+      if (prop.type !== 'Property') {
+        continue
+      }
+
+      const localName = getStaticPropertyName(prop)
+      if (localName === null) {
+        continue
+      }
+
+      if (prop.value.type === 'Literal' && typeof prop.value.value === 'string') {
+        entries.push({
+          localName,
+          mappedName: namespace !== null ? namespace + '/' + prop.value.value : prop.value.value,
+        })
+      } else if (prop.value.type === 'Identifier') {
+        entries.push({
+          localName,
+          mappedName: namespace !== null ? namespace + '/' + prop.value.name : prop.value.name,
+        })
+      }
+    }
+  } else if (mappingArg.type === 'ArrayExpression') {
+    for (const element of mappingArg.elements) {
+      if (element !== null && element.type === 'Literal' && typeof element.value === 'string') {
+        entries.push({
+          localName: element.value,
+          mappedName: namespace !== null ? namespace + '/' + element.value : element.value,
+        })
+      }
+    }
+  }
+
+  return entries
+}
+
+/**
+ * Resolve known Vuex module names to source files.
+ *
+ * @param {string} filePath
+ * @returns {Map<string, string>}
+ */
+function resolveVuexModulePaths(filePath) {
+  const candidates = [
+    path.resolve(process.cwd(), 'src_new/store/index.js'),
+    path.resolve(process.cwd(), 'src_admin/store/index.js'),
+  ]
+  const modulePaths = new Map()
+
+  for (const storeIndexPath of candidates) {
+    const content = readTextFile(storeIndexPath)
+    if (content === null) {
+      continue
+    }
+
+    const importPathByName = extractImportPathMapFromSource(content, storeIndexPath)
+    const modulesMatch = content.match(/modules\s*:\s*\{/)
+    if (modulesMatch === null) {
+      continue
+    }
+
+    const modulesBlock = extractBracedBlock(content, modulesMatch.index + modulesMatch[0].length)
+    if (modulesBlock === null) {
+      continue
+    }
+
+    const moduleRegex = /(?:^|,)\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:\s*([a-zA-Z_$][a-zA-Z0-9_$]*)/g
+    let moduleMatch
+
+    while ((moduleMatch = moduleRegex.exec(modulesBlock)) !== null) { // nosemgrep - static local regex on linted source, not runtime user input.
+      const resolvedPath = importPathByName.get(moduleMatch[2])
+      if (resolvedPath !== undefined) {
+        modulePaths.set(moduleMatch[1], resolvedPath)
+      }
+    }
+  }
+
+  return modulePaths
+}
+
+/**
+ * Extract Vuex getter names from a store module file.
+ *
+ * @param {string} modulePath
+ * @returns {Set<string>}
+ */
+function extractVuexGetterNames(modulePath) {
+  const names = new Set()
+  const content = readTextFile(modulePath)
+  if (content === null) {
+    return names
+  }
+
+  let gettersMatch = content.match(/(?:const\s+getters|getters)\s*=\s*\{/)
+  if (gettersMatch === null) {
+    gettersMatch = content.match(/getters\s*:\s*\{/)
+  }
+
+  if (gettersMatch === null) {
+    return names
+  }
+
+  const gettersBlock = extractBracedBlock(content, gettersMatch.index + gettersMatch[0].length)
+  if (gettersBlock === null) {
+    return names
+  }
+
+  for (const name of extractObjectBodyKeysFromText(gettersBlock)) {
+    names.add(name)
+  }
+
+  const importPathByName = extractImportPathMapFromSource(content, modulePath)
+  const spreadSourceNames = extractSpreadSourceNames(gettersBlock)
+  for (const spreadSourceName of spreadSourceNames) {
+    const spreadSourcePath = importPathByName.get(spreadSourceName)
+    if (spreadSourcePath === undefined) {
+      continue
+    }
+
+    for (const spreadGetterName of extractVuexGetterNames(spreadSourcePath)) {
+      names.add(spreadGetterName)
+    }
+  }
+
+  return names
+}
+
+/**
+ * Resolve a Vuex getter path like ShopAuth/currentUser.
+ *
+ * @param {string} mappedName
+ * @param {Map<string, string>} modulePaths
+ * @returns {{exists: boolean|null, getterName: string, candidates: Set<string>}}
+ */
+function resolveVuexGetter(mappedName, modulePaths) {
+  const slashIndex = mappedName.indexOf('/')
+  if (slashIndex === -1) {
+    return { exists: null, getterName: mappedName, candidates: new Set() }
+  }
+
+  const moduleName = mappedName.slice(0, slashIndex)
+  const getterName = mappedName.slice(slashIndex + 1)
+  const modulePath = modulePaths.get(moduleName)
+  if (modulePath === undefined) {
+    return { exists: null, getterName, candidates: new Set() }
+  }
+
+  const candidates = extractVuexGetterNames(modulePath)
+  return { exists: candidates.has(getterName), getterName, candidates }
+}
+
+/**
+ * Collect member-expression root identifiers from Vue template expressions.
+ * This intentionally checks only roots of member expressions, for example `modules` in `modules.WEBSITE`.
+ *
+ * @param {import('estree').Node|null} node
+ * @param {Map<string, import('estree').Node[]>} collected
+ */
+function collectTemplateMemberRoots(node, collected) {
+  if (node === null || typeof node !== 'object') {
+    return
+  }
+
+  if (
+    node.type === 'MemberExpression' &&
+    node.object.type === 'Identifier' &&
+    node.property.type === 'Identifier' &&
+    node.computed === false
+  ) {
+    const rootName = node.object.name
+    if (!collected.has(rootName)) {
+      collected.set(rootName, [])
+    }
+    collected.get(rootName).push(node.object)
+  }
+
+  for (const key of Object.keys(node)) {
+    if (key === 'parent') {
+      continue
+    }
+
+    const value = node[key]
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        collectTemplateMemberRoots(item, collected)
+      }
+    } else if (value !== null && typeof value === 'object') {
+      collectTemplateMemberRoots(value, collected)
+    }
+  }
+}
+
+/**
+ * Add identifiers from function parameter patterns to a local-name set.
+ *
+ * @param {import('estree').Node} pattern
+ * @param {Set<string>} collected
+ */
+function collectPatternNames(pattern, collected) {
+  if (pattern === null || pattern === undefined) {
+    return
+  }
+
+  if (pattern.type === 'Identifier') {
+    collected.add(pattern.name)
+    return
+  }
+
+  if (pattern.type === 'ObjectPattern') {
+    for (const property of pattern.properties) {
+      if (property.type === 'Property') {
+        collectPatternNames(property.value, collected)
+      } else if (property.type === 'RestElement') {
+        collectPatternNames(property.argument, collected)
+      }
+    }
+    return
+  }
+
+  if (pattern.type === 'ArrayPattern') {
+    for (const element of pattern.elements) {
+      collectPatternNames(element, collected)
+    }
+    return
+  }
+
+  if (pattern.type === 'AssignmentPattern') {
+    collectPatternNames(pattern.left, collected)
+    return
+  }
+
+  if (pattern.type === 'RestElement') {
+    collectPatternNames(pattern.argument, collected)
+  }
+}
+
+/**
+ * Add function parameter identifiers to a local-name set.
+ *
+ * @param {import('estree').Node} fnNode
+ * @param {Set<string>} collected
+ */
+function collectFunctionParamNames(fnNode, collected) {
+  for (const param of fnNode.params) {
+    collectPatternNames(param, collected)
+  }
+}
+
+/**
+ * Add variable identifiers from Vue parser nodes to a local-name set.
+ *
+ * @param {import('estree').Node|import('estree').Node[]|null|undefined} variable
+ * @param {Set<string>} collected
+ */
+function collectTemplateVariableNames(variable, collected) {
+  if (variable === null || variable === undefined) {
+    return
+  }
+
+  if (Array.isArray(variable)) {
+    for (const item of variable) {
+      collectTemplateVariableNames(item, collected)
+    }
+    return
+  }
+
+  collectPatternNames(variable, collected)
+}
+
+/**
+ * Add scoped-slot destructured variable identifiers to a local-name set.
+ *
+ * Vue parser versions can expose `#slot="{ item, index }"` variables either as
+ * `VSlotScopeExpression.params` or as a plain expression pattern.
+ *
+ * @param {import('estree').Node} node
+ * @param {Set<string>} collected
+ */
+function collectSlotScopeNames(node, collected) {
+  if (Array.isArray(node.params)) {
+    collectFunctionParamNames(node, collected)
+    return
+  }
+
+  if (node.expression !== null && node.expression !== undefined) {
+    collectTemplateVariableNames(node.expression, collected)
+  }
+}
+
+/**
+ * Traverse a Vue template AST and collect member-expression roots from expression containers.
+ *
+ * @param {import('estree').Node|null} node
+ * @param {Map<string, import('estree').Node[]>} collected
+ */
+function collectTemplateBodyMemberRoots(node, collected) {
+  if (node === null || typeof node !== 'object') {
+    return
+  }
+
+  if (node.type === 'VExpressionContainer') {
+    collectTemplateMemberRoots(node.expression, collected)
+  }
+
+  for (const key of Object.keys(node)) {
+    if (key === 'parent') {
+      continue
+    }
+
+    const value = node[key]
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        collectTemplateBodyMemberRoots(item, collected)
+      }
+    } else if (value !== null && typeof value === 'object') {
+      collectTemplateBodyMemberRoots(value, collected)
+    }
+  }
+}
+
+/**
+ * Collect local variable names introduced by template v-for expressions.
+ *
+ * @param {import('estree').Node|null} node
+ * @param {Set<string>} collected
+ */
+function collectTemplateLocalNames(node, collected) {
+  if (node === null || typeof node !== 'object') {
+    return
+  }
+
+  if (node.type === 'VForExpression' && Array.isArray(node.variables)) {
+    for (const variable of node.variables) {
+      collectTemplateVariableNames(variable, collected)
+    }
+  } else if (node.type === 'VForExpression') {
+    for (const propertyName of ['left', 'value', 'key', 'index']) {
+      collectTemplateVariableNames(node[propertyName], collected)
+    }
+  }
+
+  if (node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression') {
+    collectFunctionParamNames(node, collected)
+  }
+
+  if (node.type === 'VSlotScopeExpression') {
+    collectSlotScopeNames(node, collected)
+  }
+
+  for (const key of Object.keys(node)) {
+    if (key === 'parent') {
+      continue
+    }
+
+    const value = node[key]
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        collectTemplateLocalNames(item, collected)
+      }
+    } else if (value !== null && typeof value === 'object') {
+      collectTemplateLocalNames(value, collected)
+    }
+  }
 }
 
 /**
@@ -694,7 +1100,7 @@ function extractImportPathMapFromSource(sourceCode, filePath) {
   const importRegex = /import\s+([^'"\n]+)\s+from\s+['"]([^'"]+)['"]/g
   let importMatch
 
-  while ((importMatch = importRegex.exec(sourceCode)) !== null) {
+  while ((importMatch = importRegex.exec(sourceCode)) !== null) { // nosemgrep - static local regex on linted source, not runtime user input.
     const resolvedPath = resolveImport(filePath, importMatch[2])
     if (resolvedPath === null) {
       continue
@@ -840,6 +1246,8 @@ module.exports = {
     }],
     messages: {
       undefinedProperty: "'{{name}}' is not defined as a computed property, data, method, prop, or Vuex mapping. {{suggestion}}",
+      undefinedVuexGetter: VUEX_GETTER_REPORT_MESSAGE,
+      undefinedTemplateMember: TEMPLATE_UNDEFINED_MEMBER_MESSAGE,
       suggestion: "Did you mean '{{suggestedName}}'?",
     },
   },
@@ -847,6 +1255,7 @@ module.exports = {
   create(context) {
     const options = context.options[0] || {}
     const allowedNames = new Set(options.allowed || [])
+    allowedNames.add('$event')
 
     // Names defined in the component (data, computed, methods, props, map*)
     const definedNames = new Set()
@@ -859,6 +1268,18 @@ module.exports = {
 
     // Used names (from this.X expressions)
     const usedNames = new Map() // name -> [nodes]
+
+    /**
+     * Used template member roots (for example `modules` in `modules.WEBSITE`).
+     * @type {Map<string, import('estree').Node[]>}
+     */
+    const usedTemplateMemberRoots = new Map()
+
+    /**
+     * Template local names introduced by v-for aliases.
+     * @type {Set<string>}
+     */
+    const templateLocalNames = new Set()
 
     /**
      * Used nested Pinia names (from this.store.property expressions).
@@ -897,6 +1318,28 @@ module.exports = {
           const names = extractMapNames(node)
           for (const name of names) {
             definedNames.add(name)
+          }
+
+          if (node.callee.name === 'mapGetters') {
+            const modulePaths = resolveVuexModulePaths(context.getFilename())
+            const getterEntries = extractMapGetterEntries(node)
+
+            for (const entry of getterEntries) {
+              const resolvedGetter = resolveVuexGetter(entry.mappedName, modulePaths)
+              if (resolvedGetter.exists !== false) {
+                continue
+              }
+
+              const suggestion = findClosestName(resolvedGetter.getterName, resolvedGetter.candidates, 4)
+              context.report({
+                node,
+                messageId: 'undefinedVuexGetter',
+                data: {
+                  name: entry.mappedName,
+                  suggestion: suggestion !== null ? `Did you mean '${suggestion}'?` : '',
+                },
+              })
+            }
           }
         }
       },
@@ -1099,6 +1542,11 @@ module.exports = {
         const filePath = context.getFilename()
         const importPathByName = buildImportPathMap(node, filePath)
 
+        if (node.templateBody !== undefined) {
+          collectTemplateLocalNames(node.templateBody, templateLocalNames)
+          collectTemplateBodyMemberRoots(node.templateBody, usedTemplateMemberRoots)
+        }
+
         const spreadSourceProperties = extractSpreadSourceProperties(sourceCode, importPathByName)
         for (const prop of spreadSourceProperties) {
           definedNames.add(prop)
@@ -1193,6 +1641,9 @@ module.exports = {
       // ---- Template body visitor: handle bare identifiers in templates ----
       // In templates, component properties are accessed without `this.`
       // e.g., `v-if="loggedIn"` instead of `v-if="this.loggedIn"`
+      VExpressionContainer(node) {
+        collectTemplateMemberRoots(node.expression, usedTemplateMemberRoots)
+      },
 
       // ---- Report undefined names ----
 
@@ -1257,6 +1708,22 @@ module.exports = {
                 suggestion: suggestion !== null
                   ? `Did you mean '${usage.storeName}.${suggestion}'?`
                   : 'This Pinia store property is not defined in state, getters, or actions.',
+              },
+            })
+          }
+        }
+
+        for (const [name, nodes] of usedTemplateMemberRoots) {
+          if (allKnown.has(name) || templateLocalNames.has(name) || TEMPLATE_GLOBALS.has(name)) {
+            continue
+          }
+
+          for (const node of nodes) {
+            context.report({
+              node,
+              messageId: 'undefinedTemplateMember',
+              data: {
+                name,
               },
             })
           }
